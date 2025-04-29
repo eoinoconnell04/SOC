@@ -72,6 +72,7 @@ module fma16 (
 
     // for rounding
     logic [15:0] rounded;
+    logic round_overflow;
 
         
     // SIGN LOGIC
@@ -151,17 +152,29 @@ module fma16 (
     //assign P_shift = small_product ? (Z_e + {4'b0, Z_subnorm}) + (X_e + Y_e + {4'b0, X_subnorm} + {4'b0, Y_subnorm}) : (Z_e + {4'b0, Z_subnorm}) - P_e;
     assign A_m = smaller ? Z_m_padded >> shift_amount : P_m_shifted >> shift_amount; 
 
-    assign negligable = smaller ? (Z_m_padded != 0) && (A_m == 0) : (P_m_shifted != 0) && (A_m == 0);
+    logic [4:0] count_one, count_two;
+    logic [21:0] not_shifted, shifted;
+
+    always_comb begin
+        if (smaller) begin
+            not_shifted = P_m_shifted;
+            shifted = Z_m_padded;
+        end else begin
+            not_shifted = Z_m_padded;
+            shifted = P_m_shifted;
+        end
+    end
+
+    count_ones c1(A_m, count_one);
+    count_ones c2(shifted, count_two);
+    assign negligable = ~(count_one == count_two);
+    //assign negligable = smaller ? (Z_m_padded != 0) && (A_m == 0) : (P_m_shifted != 0) && (A_m == 0);
 
     always_comb begin
         if (subtract) begin
-            S_m = smaller ? P_m_shifted - A_m - {22'b0, negligable} : Z_m_padded - A_m - {22'b0, negligable}; 
+            S_m = smaller ? not_shifted - A_m - {22'b0, negligable} : not_shifted - A_m - {22'b0, negligable}; 
         end else begin
-            S_m = smaller ? P_m_shifted + A_m : A_m + Z_m_padded; 
-        end
-        if (x == 16'h3e00 && y == 16'h3e00 && z == 16'h0000) begin
-            //$display("P_m: %b, P_e: %b, P_m_shifted: %b, P_e: %b, Z_m_padded: %b, Z_e: %b, A_m: %b, S_m: %b", P_m, P_e, P_m_shifted, P_e, Z_m_padded, Z_e, A_m, S_m);
-            //$display("Subtract: %b, smaller: %b", subtract, smaller);
+            S_m = A_m + not_shifted;
         end
     end
 
@@ -184,6 +197,7 @@ module fma16 (
     assign res_subnorm = leading_zeros > 13;  // FIX THIS NUMBER, RANDOM GUESS, NEED TO INCORPORATE EXPONENT AS WELL
     
     assign M_e = res_subnorm ? 0 : (smaller ? P_e + 1 - leading_zeros: Z_e + 1 - leading_zeros);
+    assign overflow = M_e > 30;
     assign intermediate_m = S_m << (res_subnorm ? 13 : leading_zeros);  // FIX THIS NUMBER (13), RANDOM GUESS
     assign M_frac = intermediate_m[21:12];
 
@@ -199,7 +213,7 @@ module fma16 (
 
 
     // initialize rounding module
-    rounding r(sign, M_e[4:0], intermediate_m, roundmode, rounded, overflow);
+    rounding r(sign, M_e[4:0], intermediate_m, roundmode, rounded, round_overflow);
 
 
 
@@ -210,10 +224,10 @@ module fma16 (
     assign inexact = overflow || |intermediate_m[11:0] || (negligable && subtract); // find the range of bits that is after mantissa, (or of all bits, if any is 1, then inexact)
 
     // flags and special cases
-    assign flags = {invalid, overflow && !invalid && !qNaN && !valid_inf, underflow && !invalid && !qNaN && !valid_inf, inexact && !invalid && !qNaN && !valid_inf};
+    assign flags = {invalid, (overflow || round_overflow) && !invalid && !qNaN && !valid_inf, underflow && !invalid && !qNaN && !valid_inf, (inexact || negligable) && !invalid && !qNaN && !valid_inf};
 
     // check if the rounding mode + sign combination makes overflow be maxnum instead of infinity
-    assign overflow_maxnum = sign ? roundmode == 2'b00 || roundmode == 2'b10 : roundmode == 2'b00 || roundmode == 2'b11;
+    assign overflow_maxnum = sign ? roundmode == 2'b00 || roundmode == 2'b11 : roundmode == 2'b00 || roundmode == 2'b10;
     
     always_comb begin
 
@@ -223,13 +237,14 @@ module fma16 (
             4'b010?: result = {sign, overflow_maxnum ? 15'b11110_1111111111 : 15'b11111_0000000000};  // depends on rounding mode
             default: result = qNaN ? 16'b0_11111_1000000000 : (valid_inf ? {inf_sign, 15'b11111_0000000000} : rounded);
         endcase
-
-        if (x == 16'h3bff && y_input == 16'h5001 && z_input == 16'hfbff) begin
+        /*
+        if (x == 16'hebff && y_input == 16'ha7b6 && z_input == 16'h7bff) begin
             $display("x: %b, y: %b, z: %b", x, y_input, z_input);
-            $display("P_m: %b, P_e: %b, A_m: %b, Z_m_padded: %b, S_m: %b, intermediate: %b, smaller: %b", P_m, P_e, A_m, Z_m_padded, S_m, intermediate_m, smaller);
-            $display("mantissa: %b, expected: %b", result[9:0], 10'b1111111010);
+            $display("P_m: %b, P_e: %b, A_m: %b, Z_m_padded: %b, S_m: %b, intermediate: %b, smaller: %b, negligable: %b", P_m, P_e, A_m, Z_m_padded, S_m, intermediate_m, smaller, negligable);
+            $display("count one: %b, count two: %b, not shifted: %b, overflow_maxnum: %b", count_one, count_two, not_shifted, overflow_maxnum);
             $display("P_e: %b, Z_e: %b, res: %b, shift amount: %b", P_e, Z_e, (P_e - (Z_e + {5'b0, Z_subnorm})), shift_amount);
         end
+        */
     end
 
 endmodule
@@ -274,7 +289,7 @@ module rounding(
     assign extra_bits = intermediate_m[11:0];
 
     assign inexact = |extra_bits[11:0];
-    assign overflow = ((exponent == 5'b11110) && increase_exp) || (exponent == 5'b11111);
+    assign overflow = ((exponent == 5'b11110) && increase_exp  && inexact && inexact) || (exponent == 5'b11111);
 
     // is this the correct check for even/odd?
     assign odd = mantissa[0];
@@ -298,7 +313,6 @@ module rounding(
             default: begin
                         final_mantissa = !sign && inexact ? rounded_up : truncated;
                         final_exponent = !sign && inexact ? round_up_exp : exponent;
-                        $display("round: %b, truncated: %b:", rounded_up, truncated);
                         end
         endcase
     end
@@ -344,4 +358,15 @@ module lzd23(input logic [22:0] a,
 
     end
 endmodule
+
+module count_ones (
+    input  logic [21:0] in,
+    output logic [4:0]  count
+);
+    assign count =
+        in[0]  + in[1]  + in[2]  + in[3]  + in[4]  + in[5]  + in[6]  + in[7]  +
+        in[8]  + in[9]  + in[10] + in[11] + in[12] + in[13] + in[14] + in[15] +
+        in[16] + in[17] + in[18] + in[19] + in[20] + in[21];
+endmodule
+
 
