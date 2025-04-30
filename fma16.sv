@@ -9,6 +9,10 @@
 // number of leading zeros to determine subnormal
 
 
+// Timing: 8.72
+// Area: 30014
+
+
 module fma16 (
     input  logic [15:0] x, y, z,
     input  logic        mul, add, negp, negz,
@@ -18,9 +22,8 @@ module fma16 (
 );
     
     // Handle input configurations (mul, add, negp, negz)
-    logic [15:0] y_input, z_input;
-    assign y_input = mul ? {negp ^ y[15], y[14:0]} : 16'h3c00;
-    assign z_input = add ? {negz ^ z[15], z[14:0]} : 16'b0;
+    logic [15:0] Y_input, Z_input;
+    operation op(mul, add, negp, negz, y, z, Y_input, Z_input);
     
 
 
@@ -29,24 +32,18 @@ module fma16 (
     // for fma algorithm
     logic [4:0] X_e, Y_e, Z_e;
     logic [5:0] P_e, M_e, shift_amount;
-    logic X_nonzero, Y_nonzero, Z_nonzero, X_subnorm, Y_subnorm, Z_subnorm, small_res, subtract, sign, P_sign;
+    logic X_nonzero, Y_nonzero, Z_nonzero, X_subnorm, Y_subnorm, Z_subnorm, subtract, sign, P_sign;
     logic [10:0] X_m, Y_m, Z_m;
     logic [9:0] M_frac;
     logic [21:0] P_m, P_intermediate, A_m, Z_m_padded, P_m_shifted;
     logic [22:0] S_m, intermediate_m;
     logic [4:0] P_zeros, P_shift_amount;
     logic [4:0] leading_zeros;
-    logic [4:0] P_shift;
-    logic [40:0] S_shift, res_shift;
-    logic [15:0] fma_result;  
     logic res_subnorm, smaller, negligable;
     logic small_product;
 
     // for flags and special cases
-    logic invalid, overflow, underflow, inexact, overflow_maxnum;
-    logic sNaN, qNaN, zero_times_infinity, infinity_minus_infinity;
-    logic X_max_exp, Y_max_exp, Z_max_exp;
-    logic X_inf, Y_inf, Z_inf;
+    logic invalid, overflow, underflow, inexact, overflow_maxnum, qNaN;
     logic valid_inf, inf_sign;
     logic exact_zero, product_nonzero;
 
@@ -56,60 +53,38 @@ module fma16 (
 
         
     // SIGN LOGIC
-    assign P_sign = x[15] ^ y_input[15];  // sign is 1 when product is negative
-    assign subtract = P_sign ^ z_input[15];     // subtract is 0 when product and z have same sign
+    assign P_sign = x[15] ^ Y_input[15];  // sign is 1 when product is negative
+    assign subtract = P_sign ^ Z_input[15];     // subtract is 0 when product and z have same sign
 
 
     // Process Inputs and detect special cases
     assign X_e = x[14:10];
-    assign Y_e = y_input[14:10];
-    assign Z_e = z_input[14:10];
+    assign Y_e = Y_input[14:10];
+    assign Z_e = Z_input[14:10];
 
     assign X_nonzero = |x[14:0];
-    assign Y_nonzero = |y_input[14:0];
-    assign Z_nonzero = |z_input[14:0];
-
-    assign X_inf = (X_e == 31) && (x[9:0] == 10'b0);
-    assign Y_inf = (Y_e == 31) && (y_input[9:0] == 10'b0);
-    assign Z_inf = (Z_e == 31) && (z_input[9:0] == 10'b0);
+    assign Y_nonzero = |Y_input[14:0];
+    assign Z_nonzero = |Z_input[14:0];
 
     assign X_subnorm = (X_e == 0) & (X_nonzero);
     assign Y_subnorm = (Y_e == 0) & (Y_nonzero);
     assign Z_subnorm = (Z_e == 0) & (Z_nonzero);
 
     assign X_m = {X_nonzero & (~X_subnorm), x[9:0]};
-    assign Y_m = {Y_nonzero & (~Y_subnorm), y_input[9:0]};
-    assign Z_m = {Z_nonzero & (~Z_subnorm), z_input[9:0]};
+    assign Y_m = {Y_nonzero & (~Y_subnorm), Y_input[9:0]};
+    assign Z_m = {Z_nonzero & (~Z_subnorm), Z_input[9:0]};
 
-    assign X_max_exp = X_e == 31;
-    assign Y_max_exp = Y_e == 31;
-    assign Z_max_exp = Z_e == 31;
-
-    assign sNaN = (X_max_exp && !x[9] && |x[8:0]) || 
-        (Y_max_exp && !y_input[9] && |y_input[8:0]) || 
-        (Z_max_exp && !z_input[9] && |z_input[8:0]);
-    assign qNaN = (X_max_exp && x[9] && |x[9:0]) || 
-        (Y_max_exp && y_input[9] && |y_input[9:0]) || 
-        (Z_max_exp && z_input[9] && |z_input[9:0]);        
-    assign zero_times_infinity = (X_inf & !Y_nonzero) | (!X_nonzero & Y_inf);
-    assign infinity_minus_infinity = (P_sign ^ z[15]) & (X_inf | Y_inf) & Z_inf;
-    assign invalid = sNaN || zero_times_infinity || infinity_minus_infinity;
-
-    assign valid_inf = (X_inf || Y_inf || Z_inf) && !(zero_times_infinity || infinity_minus_infinity);
-    assign inf_sign = ((X_inf && P_sign) || (Y_inf && P_sign) || (Z_inf && z[15]));
+    special_cases sp(x, Y_input, Z_input, X_e, Y_e, Z_e, X_nonzero, Y_nonzero, P_sign, valid_inf, inf_sign, invalid, qNaN);
 
     assign product_nonzero = (X_nonzero && Y_nonzero);
 
-    //$display("X: %b, Y: %b, X_m: %b, Y_m: %b", x, y, X_m, Y_m);
-
-
-
-
-    
 
     // Starting FMA algorithm
+
+    // Find Product P_m
+
+    //product p(X_m, Y_m, X_e, Y_e, X_subnorm, Y_subnorm, product_nonzero, P_e, P_m_shifted);
     assign P_m = X_m * Y_m;
-    // FIX SMALL PRODUCT
     assign small_product = (X_e + Y_e + {5'b0, P_m[21]} + {5'b0, X_subnorm} + {5'b0, Y_subnorm}) < 15;
     assign P_e = (product_nonzero ? (X_e + Y_e - 15 + {5'b0, X_subnorm} + {5'b0, Y_subnorm} + {5'b0, P_m[21]}) : 0);
     assign P_m_shifted = P_m[21] ? P_m : P_m << 1;    
@@ -132,8 +107,6 @@ module fma16 (
         end
     end
         
-    // NEED TO FIX P_shift AND USE
-    //assign P_shift = small_product ? (Z_e + {4'b0, Z_subnorm}) + (X_e + Y_e + {4'b0, X_subnorm} + {4'b0, Y_subnorm}) : (Z_e + {4'b0, Z_subnorm}) - P_e;
     assign A_m = smaller ? Z_m_padded >> shift_amount : P_m_shifted >> shift_amount; 
 
     logic [4:0] count_one, count_two;
@@ -149,46 +122,31 @@ module fma16 (
         end
     end
 
-    count_ones c1(A_m, count_one);
-    count_ones c2(shifted, count_two);
-    assign negligable = ~(count_one == count_two) && !A_m[0];
-    //assign negligable = smaller ? (Z_m_padded != 0) && (A_m == 0) : (P_m_shifted != 0) && (A_m == 0);
+    //count_ones c1(A_m, count_one);
+    //count_ones c2(shifted, count_two);
+    logic prec_lost;
+    precision_lost pl(shifted, shift_amount, prec_lost);
 
-    always_comb begin
-        if (subtract) begin
-            S_m = smaller ? not_shifted - A_m - {22'b0, negligable} : not_shifted - A_m - {22'b0, negligable}; 
-        end else begin
-            S_m = A_m + not_shifted + {22'b0, negligable};
-        end
-    end
+    // negligable occurs when there is a loss of precision that could chagne the last bit of A_m from a 0 to a 1
+    assign negligable = prec_lost /*~(count_one == count_two)*/ && !A_m[0];
+
+    add_sub as(A_m, not_shifted, smaller, negligable, subtract, S_m);
 
     lzd23 l(S_m, leading_zeros);
-    
-
-        
+       
 
     // Check for exact zero results (not rounded to zero)
     assign exact_zero = !(|S_m);
 
-
-
-
-    // NEED LZD DETECTOR:
-    // need to check for subnormal numbers: somthing like (leading_zeros > 31) res_e = small_res ? 5'd0 : 5'(30 - leading_zeros);
-
-    // need to add two because I added extra bit for multiplication, and then another extra bit for addition 
-    
+    // need to check for subnormal numbers: somthing like (leading_zeros > 31) res_e = small_res ? 5'd0 : 5'(30 - leading_zeros);    
     assign res_subnorm = leading_zeros > 13;  // FIX THIS NUMBER, RANDOM GUESS, NEED TO INCORPORATE EXPONENT AS WELL
     
     assign M_e = res_subnorm ? 0 : (smaller ? P_e + 1 - leading_zeros: Z_e + 1 - leading_zeros);
     assign overflow = M_e > 30;
-    assign intermediate_m = S_m << (res_subnorm ? 13 : leading_zeros);  // FIX THIS NUMBER (13), RANDOM GUESS
+    assign intermediate_m = S_m << (res_subnorm ? 13 : leading_zeros); 
     assign M_frac = intermediate_m[21:12];
 
-    assign sign = ((smaller) ? P_sign : z_input[15]) && !exact_zero || (exact_zero && ((roundmode == 2'b10 && subtract) || (!subtract && z[15]))); // roundmode == 2'b10
-
-    assign fma_result = {sign, M_e[4:0], M_frac};  // deleted   (sign & (~small_res))
-    
+    assign sign = ((smaller) ? P_sign : Z_input[15]) && !exact_zero || (exact_zero && ((roundmode == 2'b10 && subtract) || (!subtract && z[15]))); // roundmode == 2'b10    
 
 
 
@@ -199,9 +157,6 @@ module fma16 (
     // initialize rounding module
     rounding r(sign, M_e[4:0], intermediate_m, roundmode, rounded, round_overflow);
 
-
-
-    
     
         
     // Flags
@@ -213,6 +168,16 @@ module fma16 (
     // check if the rounding mode + sign combination makes overflow be maxnum instead of infinity
     assign overflow_maxnum = sign ? roundmode == 2'b00 || roundmode == 2'b11 : roundmode == 2'b00 || roundmode == 2'b10;
     
+    final_result fr(sign, overflow_maxnum, qNaN, valid_inf, inf_sign, rounded, flags, result);
+    
+endmodule
+
+module final_result(
+    input logic sign, overflow_maxnum, qNaN, valid_inf, inf_sign, 
+    input logic [15:0] rounded,
+    input logic [3:0] flags,
+    output logic [15:0] result
+);
     always_comb begin
 
         // set final result
@@ -222,24 +187,8 @@ module fma16 (
             default: result = qNaN ? 16'b0_11111_1000000000 : (valid_inf ? {inf_sign, 15'b11111_0000000000} : rounded);
         endcase
         
-        if (x == 16'h0401 && y == 16'h7801 && z == 16'h7bff) begin
-            //$display("intermediate %b", intermediate_m);
-            //$display("x: %b, y: %b, z: %b", x, y_input, z_input);
-            //$display("P_m: %b, P_e: %b, A_m: %b, Z_m_padded: %b, S_m: %b, intermediate: %b, smaller: %b, negligable: %b", P_m, P_e, A_m, Z_m_padded, S_m, intermediate_m, smaller, negligable);
-            //$display("%b", {1'b0, Z_m_padded});
-            //$display("%b", {1'b0, A_m});
-            //$display("%b", S_m);
-            //$display("overflow reg: %b, overflow round: %b", overflow, round_overflow);
-            //$display("count one: %b, count two: %b, not shifted: %b, overflow_maxnum: %b", count_one, count_two, not_shifted, overflow_maxnum);
-            //$display("P_e: %b, Z_e: %b, res: %b, shift amount: %b", P_e, Z_e, (P_e - (Z_e + {5'b0, Z_subnorm})), shift_amount);
-        end
-        
     end
-
 endmodule
-
-
-
 
 
 module rounding(
@@ -286,26 +235,7 @@ module rounding(
     assign rne_up = extra_bits[11] && (|extra_bits[10:0] || odd);  
 
     always_comb begin
-        /*
-        case (roundmode)
-            2'b00:  begin 
-                        final_mantissa = truncated;
-                        final_exponent = exponent;
-                        end
-            2'b01:  begin 
-                        final_mantissa = rne_up ? rounded_up : truncated;
-                        final_exponent = rne_up ? round_up_exp : exponent;
-                        end
-            2'b10:  begin
-                        final_mantissa = sign && inexact ? rounded_up : truncated;
-                        final_exponent = sign && inexact ? round_up_exp : exponent;
-                        end
-            default: begin
-                        final_mantissa = !sign && inexact ? rounded_up : truncated;
-                        final_exponent = !sign && inexact ? round_up_exp : exponent;
-                        end
-        endcase
-        */
+        
         case (roundmode)
             2'b00:  begin 
                         round_up = 0;
@@ -322,9 +252,7 @@ module rounding(
         endcase
         final_mantissa = round_up ? rounded_up : truncated;
         final_exponent = round_up ? round_up_exp : exponent;
-        if (result == 16'h7801) begin
-            //$display("intermediate_m %b, truncated %b, roundedup %b, result %b", intermediate_m, truncated, rounded_up, final_mantissa);
-        end
+
     end
         
     assign overflow = ((exponent == 5'b11110) && increase_exp && round_up) || (exponent == 5'b11111);
@@ -371,6 +299,81 @@ module lzd23(input logic [22:0] a,
     end
 endmodule
 
+module operation (
+    input logic mul, add, negp, negz, 
+    input logic [15:0] y, z, 
+    output logic [15:0] Y_input, Z_input);
+    assign Y_input = mul ? {negp ^ y[15], y[14:0]} : 16'h3c00;
+    assign Z_input = add ? {negz ^ z[15], z[14:0]} : 16'b0;
+endmodule
+/*
+module product(
+    input logic [10:0] X_m, Y_m, 
+    input logic [4:0] X_e, Y_e, 
+    input logic X_subnorm, Y_subnorm, product_nonzero,
+    output logic [6:0] P_e,
+    output logic [21:0] P_m_shifted);
+    logic [21:0] P_m;
+    logic small_product;
+    assign P_m = X_m * Y_m;
+    assign small_product = (X_e + Y_e + {5'b0, P_m[21]} + {5'b0, X_subnorm} + {5'b0, Y_subnorm}) < 15;
+    assign P_e = (product_nonzero ? (X_e + Y_e - 15 + {5'b0, X_subnorm} + {5'b0, Y_subnorm} + {5'b0, P_m[21]}) : 0);
+    assign P_m_shifted = P_m[21] ? P_m : P_m << 1;  
+    always_comb begin $display("X_m=%b, Y_m=%b, P_m_shifted=%b, P_e=%d", X_m, Y_m, P_m_shifted, P_e); end
+endmodule
+*/
+
+module special_cases(
+    input logic [15:0] x, Y_input, Z_input, 
+    input logic [4:0] X_e, Y_e, Z_e, 
+    input logic X_nonzero, Y_nonzero, P_sign,
+    output logic valid_inf, inf_sign, invalid, qNaN);
+
+    logic sNaN, zero_times_infinity, infinity_minus_infinity;
+    logic X_or_8bits, Y_or_8bits, Z_or_8bits;
+    logic X_max_exp, Y_max_exp, Z_max_exp;
+    logic X_inf, Y_inf, Z_inf;
+
+    assign X_max_exp = X_e == 31;
+    assign Y_max_exp = Y_e == 31;
+    assign Z_max_exp = Z_e == 31;
+    assign X_or_8bits = |x[8:0];
+    assign Y_or_8bits = |Y_input[8:0];
+    assign Z_or_8bits = |Z_input[8:0];
+
+    assign X_inf = (X_max_exp) && (x[9:0] == 10'b0);
+    assign Y_inf = (Y_max_exp) && (Y_input[9:0] == 10'b0);
+    assign Z_inf = (Z_max_exp) && (Z_input[9:0] == 10'b0);
+
+    assign sNaN = (X_max_exp && !x[9] && X_or_8bits) || 
+        (Y_max_exp && !Y_input[9] && Y_or_8bits) || 
+        (Z_max_exp && !Z_input[9] && Z_or_8bits);
+    assign qNaN = (X_max_exp && x[9] && (x[9] || X_or_8bits)) || 
+        (Y_max_exp && Y_input[9] && (Y_input[9] || Y_or_8bits)) || 
+        (Z_max_exp && Z_input[9] && (Z_input[9] || Z_or_8bits));        
+    assign zero_times_infinity = (X_inf & !Y_nonzero) | (!X_nonzero & Y_inf);
+    assign infinity_minus_infinity = (P_sign ^ Z_input[15]) & (X_inf | Y_inf) & Z_inf;
+    assign invalid = sNaN || zero_times_infinity || infinity_minus_infinity;
+
+    assign valid_inf = (X_inf || Y_inf || Z_inf) && !(zero_times_infinity || infinity_minus_infinity);
+    assign inf_sign = ((X_inf && P_sign) || (Y_inf && P_sign) || (Z_inf && Z_input[15]));
+
+endmodule
+
+module add_sub(
+    input logic [21:0] A_m, not_shifted, 
+    input logic smaller, negligable, subtract, 
+    output logic [22:0] S_m);
+    always_comb begin
+        if (subtract) begin
+            S_m = smaller ? not_shifted - A_m - {22'b0, negligable} : not_shifted - A_m - {22'b0, negligable}; 
+        end else begin
+            S_m = A_m + not_shifted + {22'b0, negligable};
+        end
+    end
+endmodule
+
+// returns the number of 1s in a 22 bit signal
 module count_ones (
     input  logic [21:0] in,
     output logic [4:0]  count
@@ -379,6 +382,19 @@ module count_ones (
         in[0]  + in[1]  + in[2]  + in[3]  + in[4]  + in[5]  + in[6]  + in[7]  +
         in[8]  + in[9]  + in[10] + in[11] + in[12] + in[13] + in[14] + in[15] +
         in[16] + in[17] + in[18] + in[19] + in[20] + in[21];
+endmodule
+
+// returns a 1 whenever the right shift of the input by the shift amount would shift away a 1
+module precision_lost(
+    input  logic [21:0] in,
+    input  logic [5:0] shift_amount,
+    output logic prec_lost);
+    logic [21:0] shifted;
+    logic far_shift;
+    assign far_shift = shift_amount > 6'd22;
+    assign shifted = in << (far_shift ? 0 : 6'd22-shift_amount);
+    assign prec_lost = |shifted;
+    //always_comb begin $display("in %b, shift_amount: %d, shifted %b, far_shift %b, prec_lost %b", in, shift_amount, shifted, far_shift, prec_lost); end
 endmodule
 
 
