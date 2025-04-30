@@ -9,8 +9,8 @@
 // number of leading zeros to determine subnormal
 
 
-// Timing: 8.72
-// Area: 30014
+// Timing: 7.727844
+// Area: 29180.434504
 
 
 module fma16 (
@@ -57,7 +57,9 @@ module fma16 (
     assign subtract = P_sign ^ Z_input[15];     // subtract is 0 when product and z have same sign
 
 
-    // Process Inputs and detect special cases
+    // Process Inputs to be used for special cases and FMA algorithm
+    inputs i(x, Y_input, Z_input, X_e, Y_e, Z_e, X_nonzero, Y_nonzero, X_subnorm, Y_subnorm, Z_subnorm, X_m, Y_m, Z_m); 
+    /*
     assign X_e = x[14:10];
     assign Y_e = Y_input[14:10];
     assign Z_e = Z_input[14:10];
@@ -73,6 +75,7 @@ module fma16 (
     assign X_m = {X_nonzero & (~X_subnorm), x[9:0]};
     assign Y_m = {Y_nonzero & (~Y_subnorm), Y_input[9:0]};
     assign Z_m = {Z_nonzero & (~Z_subnorm), Z_input[9:0]};
+    */
 
     special_cases sp(x, Y_input, Z_input, X_e, Y_e, Z_e, X_nonzero, Y_nonzero, P_sign, valid_inf, inf_sign, invalid, qNaN);
 
@@ -82,15 +85,20 @@ module fma16 (
     // Starting FMA algorithm
 
     // Find Product P_m
+    product p(X_m, Y_m, X_e, Y_e, X_subnorm, Y_subnorm, product_nonzero, small_product, P_e, P_m_shifted);
 
-    //product p(X_m, Y_m, X_e, Y_e, X_subnorm, Y_subnorm, product_nonzero, P_e, P_m_shifted);
+    /*
     assign P_m = X_m * Y_m;
     assign small_product = (X_e + Y_e + {5'b0, P_m[21]} + {5'b0, X_subnorm} + {5'b0, Y_subnorm}) < 15;
     assign P_e = (product_nonzero ? (X_e + Y_e - 15 + {5'b0, X_subnorm} + {5'b0, Y_subnorm} + {5'b0, P_m[21]}) : 0);
     assign P_m_shifted = P_m[21] ? P_m : P_m << 1;    
+    */
 
+    logic [21:0] not_shifted, shifted;
+    align_shift s(P_m_shifted, P_e, Z_m, Z_e, small_product, Z_subnorm, smaller, shift_amount, not_shifted, shifted, A_m);
+    //always_comb begin $display("%b, %b, %b, %b, %b, %b, %b, %b, %b, %b, %b", P_m_shifted, P_e, Z_m, Z_e, small_product, Z_subnorm, smaller, shift_amount, not_shifted, shifted, A_m); end
+    /*
     assign Z_m_padded = {Z_m, 11'b0};
-
     always_comb begin
         // smaller = 1 when product greater than addend
         if (P_e == {1'b0, Z_e}) begin
@@ -109,7 +117,6 @@ module fma16 (
         
     assign A_m = smaller ? Z_m_padded >> shift_amount : P_m_shifted >> shift_amount; 
 
-    logic [4:0] count_one, count_two;
     logic [21:0] not_shifted, shifted;
 
     always_comb begin
@@ -121,9 +128,8 @@ module fma16 (
             shifted = P_m_shifted;
         end
     end
+    */
 
-    //count_ones c1(A_m, count_one);
-    //count_ones c2(shifted, count_two);
     logic prec_lost;
     precision_lost pl(shifted, shift_amount, prec_lost);
 
@@ -146,19 +152,15 @@ module fma16 (
     assign intermediate_m = S_m << (res_subnorm ? 13 : leading_zeros); 
     assign M_frac = intermediate_m[21:12];
 
-    assign sign = ((smaller) ? P_sign : Z_input[15]) && !exact_zero || (exact_zero && ((roundmode == 2'b10 && subtract) || (!subtract && z[15]))); // roundmode == 2'b10    
+    assign sign = ((smaller) ? P_sign : Z_input[15]) && !exact_zero || (exact_zero && ((roundmode == 2'b10 && subtract) || (!subtract && Z_input[15]))); // roundmode == 2'b10    
 
 
 
     assign underflow = (M_e == 0 && |intermediate_m[11:0]); 
 
-
-
     // initialize rounding module
     rounding r(sign, M_e[4:0], intermediate_m, roundmode, rounded, round_overflow);
 
-    
-        
     // Flags
     assign inexact = overflow || |intermediate_m[11:0] || (negligable && subtract); // find the range of bits that is after mantissa, (or of all bits, if any is 1, then inexact)
 
@@ -190,7 +192,14 @@ module final_result(
     end
 endmodule
 
-
+// performs rounding given an unrounded answer combined with a specified rounding mode
+/*
+    Rounding Modes:
+    00: round to zero    (truncate)
+    01: round to even       
+    10: round down (toward negative infinity)
+    11: round up (toward positive infinity)
+*/
 module rounding(
     input logic sign, 
     input logic [4:0] exponent, 
@@ -209,16 +218,6 @@ module rounding(
     logic inexact;
     logic rounded_sign;
     logic round_up;
-
-    /*
-    Notes:
-    00: round to zero    (truncate)
-    01: round to even       
-    10: round down (toward negative infinity)
-    11: round up (toward positive infinity)
-
-    Overflow:
-    */
 
     assign mantissa = intermediate_m[21:12];
 
@@ -264,7 +263,7 @@ endmodule
 
 
 
-
+// leading zeros detector
 module lzd23(input logic [22:0] a,
             output logic [4:0] leading_zeros);
 
@@ -299,6 +298,7 @@ module lzd23(input logic [22:0] a,
     end
 endmodule
 
+// selects and modifies inputs based on the operational inputs
 module operation (
     input logic mul, add, negp, negz, 
     input logic [15:0] y, z, 
@@ -306,23 +306,23 @@ module operation (
     assign Y_input = mul ? {negp ^ y[15], y[14:0]} : 16'h3c00;
     assign Z_input = add ? {negz ^ z[15], z[14:0]} : 16'b0;
 endmodule
-/*
+
 module product(
     input logic [10:0] X_m, Y_m, 
     input logic [4:0] X_e, Y_e, 
     input logic X_subnorm, Y_subnorm, product_nonzero,
-    output logic [6:0] P_e,
+    output logic small_product,
+    output logic [5:0] P_e,
     output logic [21:0] P_m_shifted);
     logic [21:0] P_m;
-    logic small_product;
     assign P_m = X_m * Y_m;
     assign small_product = (X_e + Y_e + {5'b0, P_m[21]} + {5'b0, X_subnorm} + {5'b0, Y_subnorm}) < 15;
     assign P_e = (product_nonzero ? (X_e + Y_e - 15 + {5'b0, X_subnorm} + {5'b0, Y_subnorm} + {5'b0, P_m[21]}) : 0);
     assign P_m_shifted = P_m[21] ? P_m : P_m << 1;  
-    always_comb begin $display("X_m=%b, Y_m=%b, P_m_shifted=%b, P_e=%d", X_m, Y_m, P_m_shifted, P_e); end
 endmodule
-*/
 
+
+// indentifies special cases
 module special_cases(
     input logic [15:0] x, Y_input, Z_input, 
     input logic [4:0] X_e, Y_e, Z_e, 
@@ -360,6 +360,7 @@ module special_cases(
 
 endmodule
 
+// performs the addition and subtraction operations
 module add_sub(
     input logic [21:0] A_m, not_shifted, 
     input logic smaller, negligable, subtract, 
@@ -371,17 +372,6 @@ module add_sub(
             S_m = A_m + not_shifted + {22'b0, negligable};
         end
     end
-endmodule
-
-// returns the number of 1s in a 22 bit signal
-module count_ones (
-    input  logic [21:0] in,
-    output logic [4:0]  count
-);
-    assign count =
-        in[0]  + in[1]  + in[2]  + in[3]  + in[4]  + in[5]  + in[6]  + in[7]  +
-        in[8]  + in[9]  + in[10] + in[11] + in[12] + in[13] + in[14] + in[15] +
-        in[16] + in[17] + in[18] + in[19] + in[20] + in[21];
 endmodule
 
 // returns a 1 whenever the right shift of the input by the shift amount would shift away a 1
@@ -397,4 +387,66 @@ module precision_lost(
     //always_comb begin $display("in %b, shift_amount: %d, shifted %b, far_shift %b, prec_lost %b", in, shift_amount, shifted, far_shift, prec_lost); end
 endmodule
 
+module inputs(
+    input logic [15:0] x, Y_input, Z_input, 
+    output logic [4:0] X_e, Y_e, Z_e, 
+    output logic X_nonzero, Y_nonzero, X_subnorm, Y_subnorm, Z_subnorm, 
+    output logic [10:0] X_m, Y_m, Z_m); 
+    logic Z_nonzero;
+    assign X_e = x[14:10];
+    assign Y_e = Y_input[14:10];
+    assign Z_e = Z_input[14:10];
 
+    assign X_nonzero = |x[14:0];
+    assign Y_nonzero = |Y_input[14:0];
+    assign Z_nonzero = |Z_input[14:0];
+
+    assign X_subnorm = (X_e == 0) & (X_nonzero);
+    assign Y_subnorm = (Y_e == 0) & (Y_nonzero);
+    assign Z_subnorm = (Z_e == 0) & (Z_nonzero);
+
+    assign X_m = {X_nonzero & (~X_subnorm), x[9:0]};
+    assign Y_m = {Y_nonzero & (~Y_subnorm), Y_input[9:0]};
+    assign Z_m = {Z_nonzero & (~Z_subnorm), Z_input[9:0]};
+endmodule
+
+module align_shift(
+    input logic [21:0] P_m_shifted,
+    input logic [5:0] P_e,
+    input logic [10:0] Z_m,
+    input logic [4:0] Z_e,
+    input logic small_product, Z_subnorm,
+    output logic smaller,
+    output logic [5:0] shift_amount,
+    output logic [21:0] not_shifted, shifted, A_m
+    );
+    logic [21:0] Z_m_padded;
+    assign Z_m_padded = {Z_m, 11'b0};
+    always_comb begin
+        // smaller = 1 when product greater than addend
+        if (P_e == {1'b0, Z_e}) begin
+            smaller = !small_product && (P_m_shifted > Z_m_padded);
+        end else begin
+            smaller = !small_product && (P_e > {1'b0, Z_e});
+        end
+
+        // determine shift amount for smaller component
+        if (smaller) begin
+            shift_amount = (P_e - (Z_e + {5'b0, Z_subnorm})); 
+        end else begin
+            shift_amount = (Z_e + {5'b0, Z_subnorm}) - P_e; 
+        end
+    end
+        
+    assign A_m = smaller ? Z_m_padded >> shift_amount : P_m_shifted >> shift_amount; 
+
+    always_comb begin
+        if (smaller) begin
+            not_shifted = P_m_shifted;
+            shifted = Z_m_padded;
+        end else begin
+            not_shifted = Z_m_padded;
+            shifted = P_m_shifted;
+        end
+    end
+endmodule
