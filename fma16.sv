@@ -2,32 +2,11 @@
 // Feb 11 2025
 // eoconnell@hmc.edu
 
-
-
 // NEED TO FIX:
-// Change subnormals to have 1 exponent instead of 0
-// Fix efficient version
-        // need to check smaller / bigger better (not just exponents for subtraction)
 
-// fixes for special cases / flags:
 // need to fix sign for overflow (is the infinity part of the add or mul?)
 // underflow for subnormal
 // number of leading zeros to determine subnormal
-// change sign logic (need to account for when same exponent but one is greater)
-        // fix smaller logic, be more throurough
-
-// CHECK FOR POTENTIAL BUG WHEN P_m[21] IS SET (FOR SHIFTING AND FOR SMALLER)
-// Should Me & Pe be more bits intermediately
-// is overflow always max/min or can it be infinity
-// undeflow from multiplication step (might need to make P_e a signed number)
-// Case where product is same exponent as addend when considereing leading 1
-
-// FIX OVERFLOW VALUES FOR DIFFERENT ROUNDING MODES
-
-
-
-
-
 
 
 module fma16 (
@@ -66,6 +45,7 @@ module fma16 (
     // for flags and special cases
     logic invalid, overflow, underflow, inexact, overflow_maxnum;
     logic sNaN, qNaN, zero_times_infinity, infinity_minus_infinity;
+    logic X_max_exp, Y_max_exp, Z_max_exp;
     logic X_inf, Y_inf, Z_inf;
     logic valid_inf, inf_sign;
     logic exact_zero, product_nonzero;
@@ -101,12 +81,16 @@ module fma16 (
     assign Y_m = {Y_nonzero & (~Y_subnorm), y_input[9:0]};
     assign Z_m = {Z_nonzero & (~Z_subnorm), z_input[9:0]};
 
-    assign sNaN = (X_e == 31 && !x[9] && |x[8:0]) || 
-        (Y_e == 31 && !y_input[9] && |y_input[8:0]) || 
-        (Z_e == 31 && !z_input[9] && |z_input[8:0]);
-    assign qNaN = (X_e == 31 && x[9] && |x[9:0]) || 
-        (Y_e == 31 && y_input[9] && |y_input[9:0]) || 
-        (Z_e == 31 && z_input[9] && |z_input[9:0]);        
+    assign X_max_exp = X_e == 31;
+    assign Y_max_exp = Y_e == 31;
+    assign Z_max_exp = Z_e == 31;
+
+    assign sNaN = (X_max_exp && !x[9] && |x[8:0]) || 
+        (Y_max_exp && !y_input[9] && |y_input[8:0]) || 
+        (Z_max_exp && !z_input[9] && |z_input[8:0]);
+    assign qNaN = (X_max_exp && x[9] && |x[9:0]) || 
+        (Y_max_exp && y_input[9] && |y_input[9:0]) || 
+        (Z_max_exp && z_input[9] && |z_input[9:0]);        
     assign zero_times_infinity = (X_inf & !Y_nonzero) | (!X_nonzero & Y_inf);
     assign infinity_minus_infinity = (P_sign ^ z[15]) & (X_inf | Y_inf) & Z_inf;
     assign invalid = sNaN || zero_times_infinity || infinity_minus_infinity;
@@ -167,14 +151,14 @@ module fma16 (
 
     count_ones c1(A_m, count_one);
     count_ones c2(shifted, count_two);
-    assign negligable = ~(count_one == count_two);
+    assign negligable = ~(count_one == count_two) && !A_m[0];
     //assign negligable = smaller ? (Z_m_padded != 0) && (A_m == 0) : (P_m_shifted != 0) && (A_m == 0);
 
     always_comb begin
         if (subtract) begin
             S_m = smaller ? not_shifted - A_m - {22'b0, negligable} : not_shifted - A_m - {22'b0, negligable}; 
         end else begin
-            S_m = A_m + not_shifted;
+            S_m = A_m + not_shifted + {22'b0, negligable};
         end
     end
 
@@ -201,7 +185,7 @@ module fma16 (
     assign intermediate_m = S_m << (res_subnorm ? 13 : leading_zeros);  // FIX THIS NUMBER (13), RANDOM GUESS
     assign M_frac = intermediate_m[21:12];
 
-    assign sign = ((smaller) ? P_sign : z_input[15]) && !exact_zero;
+    assign sign = ((smaller) ? P_sign : z_input[15]) && !exact_zero || (exact_zero && ((roundmode == 2'b10 && subtract) || (!subtract && z[15]))); // roundmode == 2'b10
 
     assign fma_result = {sign, M_e[4:0], M_frac};  // deleted   (sign & (~small_res))
     
@@ -237,14 +221,19 @@ module fma16 (
             4'b010?: result = {sign, overflow_maxnum ? 15'b11110_1111111111 : 15'b11111_0000000000};  // depends on rounding mode
             default: result = qNaN ? 16'b0_11111_1000000000 : (valid_inf ? {inf_sign, 15'b11111_0000000000} : rounded);
         endcase
-        /*
-        if (x == 16'hebff && y_input == 16'ha7b6 && z_input == 16'h7bff) begin
-            $display("x: %b, y: %b, z: %b", x, y_input, z_input);
-            $display("P_m: %b, P_e: %b, A_m: %b, Z_m_padded: %b, S_m: %b, intermediate: %b, smaller: %b, negligable: %b", P_m, P_e, A_m, Z_m_padded, S_m, intermediate_m, smaller, negligable);
-            $display("count one: %b, count two: %b, not shifted: %b, overflow_maxnum: %b", count_one, count_two, not_shifted, overflow_maxnum);
-            $display("P_e: %b, Z_e: %b, res: %b, shift amount: %b", P_e, Z_e, (P_e - (Z_e + {5'b0, Z_subnorm})), shift_amount);
+        
+        if (x == 16'h0401 && y == 16'h7801 && z == 16'h7bff) begin
+            //$display("intermediate %b", intermediate_m);
+            //$display("x: %b, y: %b, z: %b", x, y_input, z_input);
+            //$display("P_m: %b, P_e: %b, A_m: %b, Z_m_padded: %b, S_m: %b, intermediate: %b, smaller: %b, negligable: %b", P_m, P_e, A_m, Z_m_padded, S_m, intermediate_m, smaller, negligable);
+            //$display("%b", {1'b0, Z_m_padded});
+            //$display("%b", {1'b0, A_m});
+            //$display("%b", S_m);
+            //$display("overflow reg: %b, overflow round: %b", overflow, round_overflow);
+            //$display("count one: %b, count two: %b, not shifted: %b, overflow_maxnum: %b", count_one, count_two, not_shifted, overflow_maxnum);
+            //$display("P_e: %b, Z_e: %b, res: %b, shift amount: %b", P_e, Z_e, (P_e - (Z_e + {5'b0, Z_subnorm})), shift_amount);
         end
-        */
+        
     end
 
 endmodule
@@ -269,6 +258,8 @@ module rounding(
     logic [11:0] extra_bits;
     logic odd, rne_up;
     logic inexact;
+    logic rounded_sign;
+    logic round_up;
 
     /*
     Notes:
@@ -289,14 +280,13 @@ module rounding(
     assign extra_bits = intermediate_m[11:0];
 
     assign inexact = |extra_bits[11:0];
-    assign overflow = ((exponent == 5'b11110) && increase_exp  && inexact && inexact) || (exponent == 5'b11111);
 
     // is this the correct check for even/odd?
     assign odd = mantissa[0];
     assign rne_up = extra_bits[11] && (|extra_bits[10:0] || odd);  
 
     always_comb begin
-
+        /*
         case (roundmode)
             2'b00:  begin 
                         final_mantissa = truncated;
@@ -315,8 +305,30 @@ module rounding(
                         final_exponent = !sign && inexact ? round_up_exp : exponent;
                         end
         endcase
+        */
+        case (roundmode)
+            2'b00:  begin 
+                        round_up = 0;
+                        end
+            2'b01:  begin 
+                        round_up = rne_up;
+                        end
+            2'b10:  begin
+                        round_up = sign && inexact;
+                        end
+            default: begin
+                        round_up = !sign && inexact;
+                        end
+        endcase
+        final_mantissa = round_up ? rounded_up : truncated;
+        final_exponent = round_up ? round_up_exp : exponent;
+        if (result == 16'h7801) begin
+            //$display("intermediate_m %b, truncated %b, roundedup %b, result %b", intermediate_m, truncated, rounded_up, final_mantissa);
+        end
     end
         
+    assign overflow = ((exponent == 5'b11110) && increase_exp && round_up) || (exponent == 5'b11111);
+
     assign result = {sign, final_exponent, final_mantissa};    
 
 endmodule
